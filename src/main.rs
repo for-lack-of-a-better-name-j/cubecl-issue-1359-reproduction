@@ -22,4 +22,8 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     let raw_data = computation.into_data();
     println!("raw_data: {:?}", raw_data);
 }
-fn main() {}
+fn main() {
+    type RocmBackend = Autodiff<Rocm>;
+    let device = RocmDevice::default();
+    trigger_overflow_burn_multiple_tensors::<RocmBackend>(&device);
+}
