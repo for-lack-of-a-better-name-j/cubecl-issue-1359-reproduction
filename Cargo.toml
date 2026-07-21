@@ -1,0 +1,16 @@
+[package]
+name = "cubecl-issue-1359-reproduction"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = { version = "0.21.0", features = [
+  "autotune",
+  "autodiff",
+  "fusion",
+  "rocm",
+  "train",
+  "vision",
+  "wgpu",
+] }
+cubecl = { version = "0.10.0", features = ["hip"] }
