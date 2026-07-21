@@ -15,6 +15,7 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     println!("chain some ops, force load to GPU and make it crash");
     let mut computation = tensors[0].clone();
 
+    println!("The overflow will happen about here.");
     for tensor in tensors.iter().skip(1) {
         computation = computation * tensor.clone();
     }
