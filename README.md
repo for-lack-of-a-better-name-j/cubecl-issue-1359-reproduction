@@ -13,3 +13,49 @@ I found out the specific conditions under which this bug could be reproduced by 
 - `cubecl-runtime v0.10.0`
 - `cubecl-hip v0.10.0`, also applies to `cubecl-cuda v0.10.0`, but using AMD ROCm here.
 
+## Failure Mechanism
+
+The part of the code that panicked was in the `cubecl-runtime` crate, in the `register` function of `FlushingPolicyState`:
+
+```rust
+/// Tracks staged allocations and evaluates them against a [`FlushingPolicy`].
+#[derive(Default, Debug)]
+pub(crate) struct FlushingPolicyState {
+    bytes_count: u32,
+    bytes_size: u32,
+}
+
+impl FlushingPolicyState {
+    /// Record a newly staged [`Bytes`] allocation.
+    pub(crate) fn register(&mut self, bytes: &Bytes) {
+        self.bytes_count += 1;
+        self.bytes_size += bytes.len() as u32;
+    }
+}
+```
+Since the panic happened on both WSL on ROCm as well as CUDA per the issue, I knew that it had to be something common to both environments. To reproduce the bug, I used `lldb` inside my editor:
+![Bug reproduced](reproduced_the_bug_with_bytes_size.png)
+This occurred when multiple tensors, individually less than 4.2GiB, but collectively more than 4.2GiB were written to the GPU between kernel launches. So, when I run
+```rust
+fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
+    let mut tensors = Vec::new();
+    let shape = [625_000_000]; // 625,000,000 f32s * 4 bytes = 2.5gb,
+    println!("Big data dump into allocation queue");
+    for i in 0..3 {
+        println!("creating tensor {i}");
+        let data = TensorData::ones::<f32, _>(shape);
+        let tensor = Tensor::<B, 1>::from_data(data, device);
+        tensors.push(tensor);
+    }
+    println!("chain some ops, force load to GPU and make it crash");
+    let mut computation = tensors[0].clone();
+
+    println!("The overflow will happen about here.");
+    for tensor in tensors.iter().skip(1) {
+        computation = computation * tensor.clone();
+    }
+    let raw_data = computation.into_data();
+    println!("raw_data: {:?}", raw_data);
+}
+```
+the bug happens because the multiple allocations overflow `FlushingPolicyState.bytes_size` as it is a `u32` that maxes out at $2^{32}$.
