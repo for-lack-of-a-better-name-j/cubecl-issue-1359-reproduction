@@ -2,7 +2,7 @@
 Minimal reproduction harness and analysis for [CubeCL Issue #1359-Hitting addition with overflow in FlushingPolicyState](https://github.com/tracel-ai/cubecl/issues/1359).
 
 ## Summary
-In `cubecl-hip` version 0.10.0, multiple tensor allocations that are **less than 4.2 GiB individually** but **more than 4.2GiB total** can cause this error, originally pointed out by `jeandudey`  in [CubeCL issue #1359](https://github.com/tracel-ai/cubecl/issues/1359):
+In `cubecl-hip` version 0.10.0, multiple tensor allocations that are **less than 4.29 GiB individually** but **more than 4.29GiB total** can cause this error, originally pointed out by `jeandudey`  in [CubeCL issue #1359](https://github.com/tracel-ai/cubecl/issues/1359):
 ```
 thread 'DSD-0-0' (13245) panicked at /home/j/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/memory_management/drop_queue/policy.rs:36:9:
 attempt to add with overflow
@@ -36,7 +36,7 @@ impl FlushingPolicyState {
 Since the panic happened on both WSL on ROCm as well as CUDA per the issue, it was clear that the issue was vendor-agnostic. To reproduce the bug, I used `lldb` to inspect state at the time of the crash:
 ![Bug reproduced](reproduced_the_bug_with_bytes_size.png)
 ### Code to Reproduce
-Since the bug triggers when multiple tensors, individually less than 4.2GiB, but collectively more than 4.2GiB were written to the GPU between kernel launches, I wrote a minimal reproduction function:
+Since the bug triggers when multiple tensors, individually less than 4.29GiB, but collectively more than 4.29GiB were written to the GPU between kernel launches, I wrote a minimal reproduction function:
 ```rust
 fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     let mut tensors = Vec::new();
