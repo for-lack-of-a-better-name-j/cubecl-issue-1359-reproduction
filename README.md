@@ -15,8 +15,8 @@ I found out the specific conditions under which this bug could be reproduced by 
 
 ## Failure Mechanism
 
-The part of the code that panicked was in the `cubecl-runtime` crate, in the `register` function of `FlushingPolicyState`:
-
+<!--The part of the code that panicked was in the `cubecl-runtime` crate, in the `register` function of `FlushingPolicyState`:-->
+The panic originates inside the host-side resource tracking layer of the `cubecl-runtime` crate, specifically within the `register` function of `FlushingPolicyState`:
 ```rust
 /// Tracks staged allocations and evaluates them against a [`FlushingPolicy`].
 #[derive(Default, Debug)]
@@ -33,9 +33,10 @@ impl FlushingPolicyState {
     }
 }
 ```
-Since the panic happened on both WSL on ROCm as well as CUDA per the issue, I knew that it had to be something common to both environments. To reproduce the bug, I used `lldb` inside my editor:
+Since the panic happened on both WSL on ROCm as well as CUDA per the issue, it was clear that the issue was vendor-agnostic. To reproduce the bug, I used `lldb` to inspect state at the time of the crash:
 ![Bug reproduced](reproduced_the_bug_with_bytes_size.png)
-This occurred when multiple tensors, individually less than 4.2GiB, but collectively more than 4.2GiB were written to the GPU between kernel launches. So, when I run
+### Code to Reproduce
+Since the bug triggers when multiple tensors, individually less than 4.2GiB, but collectively more than 4.2GiB were written to the GPU between kernel launches, I wrote a minimal reproduction function:
 ```rust
 fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     let mut tensors = Vec::new();
