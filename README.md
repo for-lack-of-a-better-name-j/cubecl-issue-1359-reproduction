@@ -34,7 +34,7 @@ impl FlushingPolicyState {
 }
 ```
 Since the panic happened on both WSL on ROCm as well as CUDA per the issue, it was clear that the issue was vendor-agnostic. To reproduce the bug, I used `lldb` to inspect state at the time of the crash:
-![Bug reproduced](reproduced_the_bug_with_bytes_size.png)
+![LLDB showing bytes_size overflow](reproduced_the_bug_with_bytes_size.png)
 ### Code to Reproduce
 Since the bug triggers when multiple tensors, individually less than 4.29GiB, but collectively more than 4.29GiB were written to the GPU between kernel launches, I wrote a minimal reproduction function:
 ```rust
@@ -59,4 +59,4 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     println!("raw_data: {:?}", raw_data);
 }
 ```
-the bug happens because the multiple allocations overflow `FlushingPolicyState.bytes_size` as it is a `u32` that maxes out at $2^{32}$.
+In this function, three tensors of 2.5GiB are allocated. CubeCL does not send tensors to the GPU until they are actually used, so the panic does not happen until the multiplication occurs. In the loop, the bug happens because the multiple allocations overflow `FlushingPolicyState.bytes_size` as it is a `u32` that maxes out at $2^{32}$.
