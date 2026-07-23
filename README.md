@@ -69,11 +69,16 @@ band-aid fix because developers often build little sanity checks into their
 code. NASA for example uses lots of assert statements: "If this assert breaks, 
 the assumptions I made while writing this code are broken and we need to do 
 something about it." So I started thinking that the fact that the `u32` type
-in `FlushingPolicyState.bytes_size` was intentional. However, I needed to be
-sure somehow. I had never done any deep debugging like this in Rust before,
-and after a few weeks of flailing, I realized it would behoove me to see if the
-Rust ecosystem had a good debugger. Turns out it did; so I set up `lldb` with 
-the defaults from the `astronvim-community` repository.
+in `FlushingPolicyState.bytes_size` was intentional. 
+
+However, I needed to be sure somehow. I had never done any deep debugging like 
+this in Rust before, so I started off flailing  with `println!` macros for three 
+weeks. I tried everything I could think of--but since CubeCL is an async runtime
+with many moving parts, I eventually realized that `println!` just wasn't 
+going to cut the mustard. I realized it would behoove me to see if the Rust 
+ecosystem had a good debugger. Turns out it did; so I set up `lldb` in my
+AstroNvim installation with the defaults from the 
+`astronvim-community` repository. 
 
 Once I set up `lldb` figuring out how the system worked was much easier. For a 
 while there, it felt like Sisyphus pushing on that boulder in Tartarus--I had 
