@@ -60,3 +60,6 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
 }
 ```
 In this function, three tensors of 2.5GiB are allocated. CubeCL uses lazy evaluation, so it does not send tensors to the GPU until they are used in the multiplication, so the panic does not happen until the multiplication occurs. Since CubeCL does not check to flush on each tensor allocation, and only checks in GPU kernel launches, the loop causes `FlushingPolicyState.bytes_size` to overflow with >5GiB of allocations before the next kernel launch can flush it.
+
+## Root Cause Analysis
+
