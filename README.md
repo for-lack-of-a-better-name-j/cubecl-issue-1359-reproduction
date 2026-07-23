@@ -62,4 +62,21 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
 In this function, three tensors of 2.5GiB are allocated. CubeCL uses lazy evaluation, so it does not send tensors to the GPU until they are used in the multiplication, so the panic does not happen until the multiplication occurs. Since CubeCL does not check to flush on each tensor allocation, and only checks in GPU kernel launches, the loop causes `FlushingPolicyState.bytes_size` to overflow with >5GiB of allocations before the next kernel launch can flush it.
 
 ## Root Cause Analysis
+If you're reading this and you're still interested, this is the part where I'll
+talk a little bit more about my thought process that I used to find the root 
+cause of the bug. I knew that a simple type widening of a value may have been a
+band-aid fix because developers often build little sanity checks into their 
+code. NASA for example uses lots of assert statements: "If this assert breaks, 
+the assumptions I made while writing this code are broken and we need to do 
+something about it." So I started thinking that the fact that the `u32` type
+in `FlushingPolicyState.bytes_size` was intentional. However, I needed to be
+sure somehow. I had never done any deep debugging like this in Rust before,
+and after a few weeks of flailing, I realized it would behoove me to see if the
+Rust ecosystem had a good debugger. Turns out it did; so I set up `lldb` with 
+the defaults from the `astronvim-community` repository.
+
+Once I set up `lldb` figuring out how the system worked was much easier. For a 
+while there, it felt like Sisyphus pushing on that boulder in Tartarus--I had 
+chosen a bit of a challenging task to start with in the low-level space, but
+I just knew there had to be some mechanistic reason for the `u32` overflow.
 
