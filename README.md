@@ -80,11 +80,15 @@ crashed! In my mind the race condition case would mean that multiple threads
 were able to race to the FlushingPolicyState counter faster than it could
 get a chance to flush itself. 
 
-However, I needed to be sure somehow. I had never done any deep debugging like 
-this in Rust before, so I started off flailing  with `println!` macros for three 
+Then I wondered--what is the `FlushingPolicyState` anyway? What is it's purpose?
+What does it do? So I started trying to reason about the codebase. I had never
+worked on anything this complex in Rust before, so I started off flailing 
+with `println!` macros and trying to just read the code for three 
 weeks. I tried everything I could think of--but since CubeCL is an async runtime
-with many moving parts, I eventually realized that `println!` just wasn't 
-going to cut the mustard. I realized it would behoove me to see if the Rust 
+with many moving parts: procmacros, channels, lots of threads going 
+simultaneously, and so on. Beautiful software engineering. Nevertheless,
+I realized that `println!` and reading the code just wasn't going to cut the 
+mustard. I realized it would behoove me to see if the Rust 
 ecosystem had a good debugger. Turns out it did; so I set up `lldb` in my
 AstroNvim installation with the defaults from the 
 `astronvim-community` repository. 
