@@ -71,6 +71,15 @@ the assumptions I made while writing this code are broken and we need to do
 something about it." So I started thinking that the fact that the `u32` type
 in `FlushingPolicyState.bytes_size` was intentional. 
 
+I wondered what it could have been--a producer-consumer imbalance? That's what
+I thought at first. I quickly rejected that hypothesis as I could not find
+sufficient evidence. I was wondering if it were a race condition--the OP said
+that the problem occurred with more threads. So I bumped up the thread count 
+and, rather than this particular bug, got an OOM error and my compositor 
+crashed! In my mind the race condition case would mean that multiple threads 
+were able to race to the FlushingPolicyState counter faster than it could
+get a chance to flush itself. 
+
 However, I needed to be sure somehow. I had never done any deep debugging like 
 this in Rust before, so I started off flailing  with `println!` macros for three 
 weeks. I tried everything I could think of--but since CubeCL is an async runtime
