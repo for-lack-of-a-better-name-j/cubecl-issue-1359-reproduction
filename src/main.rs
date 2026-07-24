@@ -38,9 +38,9 @@ fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
     }
 
     println!("chain some ops so that they are sent to GPU and show large allocation behavior!");
-    let mut computation = humongous_tensor.clone();
-    for itty_bitty_tensor in itty_bitty_tensors.iter() {
-        computation = computation * itty_bitty_tensor.clone();
+    let mut computation = itty_bitty_tensors[0].clone();
+    for itty_bitty_tensor in itty_bitty_tensors.iter().skip(1) {
+        computation = computation * humongous_tensor.clone();
     }
     let raw_data = computation.into_data();
     println!("raw_data: {:?}", raw_data);
@@ -49,5 +49,5 @@ fn main() {
     type RocmBackend = Autodiff<Rocm>;
     let device = RocmDevice::default();
     allocate_humongous_tensor::<RocmBackend>(&device);
-    trigger_overflow_burn_multiple_tensors::<RocmBackend>(&device);
+    //trigger_overflow_burn_multiple_tensors::<RocmBackend>(&device);
 }
