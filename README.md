@@ -96,5 +96,18 @@ AstroNvim installation with the defaults from the
 Once I set up `lldb` figuring out how the system worked was much easier. For a 
 while there, it felt like Sisyphus pushing on that boulder in Tartarus--I had 
 chosen a bit of a challenging task to start with in the low-level space, but
-I just knew there had to be some mechanistic reason for the `u32` overflow.
+I just knew there had to be some mechanistic reason for the `u32` overflow. With `lldb`, I learned that `FlushingPolicyState.register()` is only called to in two situations: 
+1. When tensors are written to the GPU.
+2. When kernels are launched.
 
+To figure that out though, I had to get a decent idea of how CubeCL sends work
+to the GPU. So I ran the OP's code and dropped a breakpoint on `FlushingPolicyState.register()`. Then I stepped out of functions until
+I could see the `FlushingPolicyState.register()`'s caller. I only saw one 
+function that ever actually called it, and it was in `cubecl-hip`:
+`write_to_gpu()`, which was called by the kernel launching function of the `ComputeServer` which is `kernel`. I then noticed that in that very same thread and execution
+path (therefore no possibility for race in this particular case) that
+`PendingDropQueue.should_flush()` was called. To be honest I was stumped.
+If the only place was `kernel` and in the same thread `should_flush`, why was an overflow happening? I decided to try overflowing it by allocating a single 5GiB tensor.
+
+
+### Attempt to Reproduce by Allocating a 5GiB Tensor
