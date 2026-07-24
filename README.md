@@ -111,3 +111,68 @@ If the only place was `kernel` and in the same thread `should_flush`, why was an
 
 
 ### Attempt to Reproduce by Allocating a 5GiB Tensor
+I then attempted to reproduce the bug by allocating a 5 GiB tensor:
+```rust
+fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
+    let shape = [1_250_000_000]; // 1,250,000,000 f32s * 4 bytes = 5.0gb,
+    println!("Creating humongous tensor!");
+    let humongous_data = TensorData::ones::<f32, _>(shape);
+    let humongous_tensor = Tensor::<B, 1>::from_data(humongous_data, device);
+    println!("Creating itty bitty tensor!");
+    let itty_bitty_shape = [1]; //
+    let mut itty_bitty_tensors = Vec::new();
+    for i in 0..3 {
+        println!("creating itty_bitty_tensor {i}");
+        let itty_bitty_data = TensorData::ones::<f32, _>([1]);
+        let itty_bitty_tensor = Tensor::<B, 1>::from_data(itty_bitty_data, device);
+        itty_bitty_tensors.push(itty_bitty_tensor.clone());
+    }
+
+    println!("chain some ops so that they are sent to GPU and show large allocation behavior!");
+    let mut computation = itty_bitty_tensors[0].clone();
+    for itty_bitty_tensor in itty_bitty_tensors.iter().skip(1) {
+        computation = computation * humongous_tensor.clone();
+    }
+    let raw_data = computation.into_data();
+    println!("raw_data: {:?}", raw_data);
+}
+```
+I thought, "Surely I'll trigger the bug now! I've allocated more than 4.2GiB into the `PendingDropQueue`!" No dice:
+![5GiB tensor allocations don't crash the runtime](5gib_failed_attempt.png)
+Look at that! The debugger's stopped on line 37, the addition to `self.bytes_size` 
+is completed. Look at the top left: `bytes` has a len of 5 billion. 
+And `self.bytes_size` is only 705032704? Why? 
+Because using the `as` keyword going from a larger numeric type to a smaller one 
+will truncate it, chopping off any bits in the $2^{32}$ place or higher.
+In the moment, though, this absolutely mystified me because I didn't notice the 
+truncation happening.
+
+### A False Detour: WSL Behavior
+Per OP, this bug occurred on WSL. Since on my machine I was getting OOM errors 
+on my card and crashing, and OP was experiencing VRAM usage at around 12GiB,
+I started to wonder if the Windows VRAM allocator was pushing tensor allocations
+to page memory and, therefore, slowing down the pipeline to kernel launch, 
+resulting in a `FlushingPolicyState` overflow. After several hours of research,
+I determined that the documentation was not clear enough to give a definitive answer.
+Additionally, another poster running CUDA on Arch Linux was reporting the same bug.
+Since evidence was insufficient for now, I decided to go back to the debugger.
+
+### And then it hit me like a train
+It all starts with, "Wait, that's funny..." doesn't it? This root cause sure did.
+I was looking all over the code base, setting conditional breakpoints in `lldb`
+for anything that might cause the runtime to break. Absolutely nothing. I was 
+mystified. At some point I just gave up and made a conditional breakpoint such that
+when anything over 2MiB was in the `FlushingPolicyState.bytes_size` it would stop.
+I also had another breakpoint on the `FlushingPolicyState.should_flush` method.
+I was in a bit of a zombie mode at that point, hoping, wishing, for something to
+happen. I was just on the precipice of wondering whether this was worth my time,
+or if I was ever going to find it, but I kept at it. After pushing the continue button for `nvim-dap` many, many times, I saw something. 
+I thought, "Wait, that's funny..." and realized that `FlushingPolicyState.register` 
+was being called multiple times between `FlushingPolicyState.should_flush` calls.
+I got really excited. The only thing I had to figure out next was how.
+I was out of time for that day so I logged off. The next day, for the first
+hour or so, I could not for the life of me get it to happen again.
+With dismay I desperately kept hitting F5. Then--finally--it happened again.
+And I still had some time.
+
+### Finding the Actual Root Cause
