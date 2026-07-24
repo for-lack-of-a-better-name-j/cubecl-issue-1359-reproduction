@@ -63,12 +63,12 @@ In this function, three tensors of 2.5GiB are allocated. CubeCL uses lazy evalua
 
 ## Root Cause Analysis
 If you're reading this and you're still interested, this is the part where I'll
-talk a little bit more about my thought process that I used to find the root 
+talk a little bit more about the thought process that I used to find the root 
 cause of the bug. I knew that a simple type widening of a value may have been a
 band-aid fix because developers often build little sanity checks into their 
-code. NASA for example uses lots of assert statements: "If this assert breaks, 
-the assumptions I made while writing this code are broken and we need to do 
-something about it." So I started thinking that the fact that the `u32` type
+code. NASA, for example, uses lots of assert statements: "If this assert breaks, 
+the assumptions made while writing this code are broken and something must be
+done about it." So I started thinking that the fact that the `u32` type
 in `FlushingPolicyState.bytes_size` was intentional. 
 
 I wondered what it could have been--a producer-consumer imbalance? That's what
@@ -76,7 +76,7 @@ I thought at first. I quickly rejected that hypothesis as I could not find
 sufficient evidence. I was wondering if it were a race condition--the OP said
 that the problem occurred with more threads. So I bumped up the thread count 
 and, rather than this particular bug, got an OOM error and my compositor 
-crashed! In my mind the race condition case would mean that multiple threads 
+crashed! In my mind, the race condition case would mean that multiple threads 
 were able to race to the FlushingPolicyState counter faster than it could
 get a chance to flush itself. 
 
@@ -84,10 +84,10 @@ Then I wondered--what is the `FlushingPolicyState` anyway? What is it's purpose?
 What does it do? So I started trying to reason about the codebase. I had never
 worked on anything this complex in Rust before, so I started off flailing 
 with `println!` macros and trying to just read the code for three 
-weeks. I tried everything I could think of--but since CubeCL is an async runtime
-with many moving parts: procmacros, channels, lots of threads going 
-simultaneously, and so on. Beautiful software engineering. Nevertheless,
-I realized that `println!` and reading the code just wasn't going to cut the 
+weeks. I tried everything I could think of; but CubeCL is an async runtime
+with many moving parts: procmacros, channels, and lots of threads going 
+simultaneously. Beautiful software engineering. Nevertheless,
+I realized that `println!` and reading the code just weren't going to cut the 
 mustard. I realized it would behoove me to see if the Rust 
 ecosystem had a good debugger. Turns out it did; so I set up `lldb` in my
 AstroNvim installation with the defaults from the 
