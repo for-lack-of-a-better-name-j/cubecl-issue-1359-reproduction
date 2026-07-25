@@ -48,6 +48,6 @@ fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
 fn main() {
     type RocmBackend = Autodiff<Rocm>;
     let device = RocmDevice::default();
-    allocate_humongous_tensor::<RocmBackend>(&device);
-    //trigger_overflow_burn_multiple_tensors::<RocmBackend>(&device);
+    //allocate_humongous_tensor::<RocmBackend>(&device);
+    trigger_overflow_burn_multiple_tensors::<RocmBackend>(&device);
 }
