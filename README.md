@@ -15,7 +15,6 @@ I found out the specific conditions under which this bug could be reproduced by 
 
 ## Failure Mechanism
 
-<!--The part of the code that panicked was in the `cubecl-runtime` crate, in the `register` function of `FlushingPolicyState`:-->
 The panic originates inside the host-side resource tracking layer of the `cubecl-runtime` crate, specifically within the `register` function of `FlushingPolicyState`:
 ```rust
 /// Tracks staged allocations and evaluates them against a [`FlushingPolicy`].
@@ -148,7 +147,47 @@ In the moment, though, this absolutely mystified me because I didn't notice the
 truncation happening.
 
 ### Another detour: why it's not a race condition
-Then I thought, _well maybe it's a race condition. Maybe _.
+Then I thought, _well maybe it's a race condition. Maybe two threads queue up 
+work and/or memory allocations to the GPU faster than `FlushingPolicyState`
+can check itself with `should_flush`._ So I started using my trusty debugger 
+to go through the architecture of how CubeCL loads up tensors and issues 
+commands to the GPU.
+
+I learned a lot about how async runtimes work, and how CubeCL handles things.
+It was quite the journey through a procmacro, an async message-passing pipeline, 
+custom `Drop` implementations, and so on. Massive respect to maintainers, 
+I learned a ton from just using `lldb` to inspect how it worked.
+That pipeline was clearly NOT easy to make and it absolutely performs.
+
+At any rate, to figure out how jobs were scheduled, I dropped a breakpoint on 
+`FlushingPolicyState.register()` and stepped the debugger out to look at the 
+whole chain of operations to understand. While it would be inconvenient to
+put the entire pipeline here, it's functionality is, very generally:
+1. An op is called from the high-level interface in `burn`. For example, 
+a `Conv2d` operation is called.
+2. `burn` puts this operation into a queue via message passing.
+3. This message pipes to CubeCL. In CubeCL, the `ComputeClient` and `ComputeServer`,
+are generic over backend type (e.g. `rocm`, `cuda`, `vulkan`, etc.). 
+The `ComputeClient` receives the op.
+4. The `ComputeClient` puts it in the `ComputeServer`'s queue.
+5. The `ComputeServer` can have more than the two following threads,
+threads, but in my case, consistently, two threads were generated and used
+by the `ComputeServer`: `DSU-0-0` and `DSD-0-0`.
+6. DSU is short for Device Service Upstream, and is responsible for things 
+such as kernel fusion and compiling kernels.
+7. DSD is short for Device Service Downstream, and is responsible for managing
+GPU memory and launching kernels.
+8. `DSD-0-0` received the op, ran `FlushingPolicyState.register()` via 
+`PendingDropQueue.register()`, launched the kernel, and checked `should_flush()`.
+Having found all this, I could not for the life of me find anywhere where that 
+`should_flush` was not called when needed. I was baffled.
+
+I knew it wasn't a race condition because the only thread that launched
+kernels and registered memory in the `FlushingPolicyState` also immediately
+checked `should_flush` and if necessary, flushed itself. I began to wonder
+if the problem were a quirk of WSL that was also common to using CUDA
+on Linux when allocating large numbers of tensors.
+
 ### Another false alarm: WSL behavior
 Per OP, this bug occurred on WSL. Since on my machine I was getting OOM errors 
 on my card and crashing, and OP was experiencing VRAM usage at around 12GiB,
@@ -160,7 +199,7 @@ Additionally, another poster running CUDA on Arch Linux was reporting the same b
 Since evidence was insufficient for now, I decided to go back to the debugger.
 
 ### _Wait, that's funny..._
-It all starts with, "Wait, that's funny..." doesn't it? This root cause sure did.
+It all starts with, _Wait, that's funny..._ doesn't it? This root cause sure did.
 I was looking all over the code base, setting conditional breakpoints in `lldb`
 for anything that might cause the runtime to break. Absolutely nothing. I was 
 mystified. At some point I just gave up and made a conditional breakpoint such that
