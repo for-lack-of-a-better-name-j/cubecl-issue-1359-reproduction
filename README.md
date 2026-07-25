@@ -110,7 +110,7 @@ path (therefore no possibility for race in this particular case) that
 If the only place was `kernel` and in the same thread `should_flush`, why was an overflow happening? I decided to try overflowing it by allocating a single 5GiB tensor.
 
 
-### Allocating a tensor larger than 4.29GiB doesn't reproduce the bug 
+### The first of many false leads: allocating a tensor larger than 4.29GiB doesn't reproduce the bug 
 I then attempted to reproduce the bug by allocating a 5 GiB tensor:
 ```rust
 fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
@@ -147,7 +147,8 @@ will truncate it, chopping off any bits in the $2^{32}$ place or higher.
 In the moment, though, this absolutely mystified me because I didn't notice the 
 truncation happening.
 
-### My first of many detours: why it's not a race condition
+### Another detour: why it's not a race condition
+Then I thought, _well maybe it's a race condition. Maybe _.
 ### Another false alarm: WSL behavior
 Per OP, this bug occurred on WSL. Since on my machine I was getting OOM errors 
 on my card and crashing, and OP was experiencing VRAM usage at around 12GiB,
@@ -158,7 +159,7 @@ I determined that the documentation was not clear enough to give a definitive an
 Additionally, another poster running CUDA on Arch Linux was reporting the same bug.
 Since evidence was insufficient for now, I decided to go back to the debugger.
 
-### "Wait, that's funny..."
+### _Wait, that's funny..._
 It all starts with, "Wait, that's funny..." doesn't it? This root cause sure did.
 I was looking all over the code base, setting conditional breakpoints in `lldb`
 for anything that might cause the runtime to break. Absolutely nothing. I was 
