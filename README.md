@@ -110,7 +110,7 @@ path (therefore no possibility for race in this particular case) that
 If the only place was `kernel` and in the same thread `should_flush`, why was an overflow happening? I decided to try overflowing it by allocating a single 5GiB tensor.
 
 
-### Attempt to Reproduce by Allocating a 5GiB Tensor
+### Allocating a tensor larger than 4.29GiB doesn't reproduce the bug 
 I then attempted to reproduce the bug by allocating a 5 GiB tensor:
 ```rust
 fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
@@ -147,8 +147,8 @@ will truncate it, chopping off any bits in the $2^{32}$ place or higher.
 In the moment, though, this absolutely mystified me because I didn't notice the 
 truncation happening.
 
-
-### A False Detour: WSL Behavior
+### My first of many detours: why it's not a race condition
+### Another false alarm: WSL behavior
 Per OP, this bug occurred on WSL. Since on my machine I was getting OOM errors 
 on my card and crashing, and OP was experiencing VRAM usage at around 12GiB,
 I started to wonder if the Windows VRAM allocator was pushing tensor allocations
@@ -158,7 +158,7 @@ I determined that the documentation was not clear enough to give a definitive an
 Additionally, another poster running CUDA on Arch Linux was reporting the same bug.
 Since evidence was insufficient for now, I decided to go back to the debugger.
 
-### And then it hit me like a train
+### "Wait, that's funny..."
 It all starts with, "Wait, that's funny..." doesn't it? This root cause sure did.
 I was looking all over the code base, setting conditional breakpoints in `lldb`
 for anything that might cause the runtime to break. Absolutely nothing. I was 
@@ -168,15 +168,16 @@ I also had another breakpoint on the `FlushingPolicyState.should_flush` method.
 I was in a bit of a zombie mode at that point, hoping, wishing, for something to
 happen. I was just on the precipice of wondering whether this was worth my time,
 or if I was ever going to find it, but I kept at it. After pushing the continue button for `nvim-dap` many, many times, I saw something. 
-I thought, "Wait, that's funny..." and realized that `FlushingPolicyState.register()` 
-was being called multiple times between `FlushingPolicyState.should_flush()` calls.
+I thought, "Wait, that's funny..." and realized that 
+`FlushingPolicyState.register()` was being called multiple times between 
+`FlushingPolicyState.should_flush()` calls.
 I got really excited. The only thing I had to figure out next was how.
 I was out of time for that day so I logged off. The next day, for the first
 hour or so, I could not for the life of me get it to happen again.
 With dismay I desperately kept hitting F5. Then--finally--it happened again.
 And I still had some time.
 
-### Finding the Actual Root Cause
+### The actual root cause was surprising
 So: `FlushingPolicyState.register()` was being called multiple times between 
 calls to `FlushingPolicyState.should_flush()`. That was a start to finding the true
 cause, I was almost sure of it. So I used my newly-found tool `lldb` with 
