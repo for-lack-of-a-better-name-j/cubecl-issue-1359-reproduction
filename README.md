@@ -167,23 +167,27 @@ like this:
 1. A matrix or tensor operation is called from the high-level interface in `burn`,
 such as a `Conv2d` layer call.
 2. The front end, `burn` puts this operation into a queue via message passing.
-3. The message arrives with CubeCL. The most relevant components of `cubecl`, 
-the `ComputeClient` and `ComputeServer`
-are generic over backend type (e.g. `rocm`, `cuda`, `vulkan`, etc.). 
-The `ComputeClient` receives the op.
-4. The `ComputeClient` puts it in the `ComputeServer`'s queue.
-5. The `ComputeServer` can have more than the two following threads,
-threads, but in my case, consistently, two threads were generated and used
-by the `ComputeServer`: `DSU-0-0` and `DSD-0-0`.
-6. DSU is short for Device Service stage Upstream, and is responsible for things 
-such as kernel fusion and compiling kernels.
+3. The message arrives in `cubecl-hip`'s boundaries. The most relevant  
+components of `cubecl`, the `ComputeClient` and `ComputeServer`,
+are generic over backend type (e.g. `rocm`, `cuda`, `vulkan`, etc.), 
+and the exact crate changes depending on what backend is used.
+The `ComputeClient` receives the op from the front end.
+4. The `ComputeClient` puts it in a queue to pass to the `ComputeServer`.
+5. The custom channel in `cubecl-common` use can have more than the two 
+following threads, but in my case, consistently, two threads were generated and
+used: `DSU-0-0` and `DSD-0-0`.
+6. DSU is short for Device Service stage Upstream, and is responsible for producing 
+work ahead of time, such as autodiff graph construction and kernel fusion.
 7. DSD is short for Device Service stage Downstream, and is responsible for managing
 GPU memory and launching kernels.
 8. `DSD-0-0` received the op, ran `FlushingPolicyState.register()` via 
-`PendingDropQueue.register()`, launched the kernel, and checked `should_flush()`.
-Having found all this, I could not for the life of me find anywhere where that 
-`should_flush` was not called when needed. I was baffled.
+`PendingDropQueue.register()`, launched the kernel, checked `should_flush()`, 
+and flushed if needed.
 
+I stared at `DSD-0-0`'s codepath, stumped. I stared at what I thought was the 
+one entry hierearchy that called `FlushingPolicyState.register()`.
+
+My hypothesis disproven, I recorded what evidence I found.
 I knew it wasn't a race condition because the only thread that launched
 kernels and registered memory in the `FlushingPolicyState` also immediately
 checked `should_flush` and if necessary, flushed itself. I began to wonder
