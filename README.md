@@ -196,7 +196,8 @@ on Linux when allocating large numbers of tensors.
 
 ### Another false alarm: WSL behavior
 Per OP, this bug occurred on WSL. Since on my machine I was getting OOM errors 
-on my card and crashing, and OP was experiencing VRAM usage at around 12GiB,
+on my card, the same card as the OP, and crashing, 
+and the OP was experiencing VRAM usage at around 12GiB,
 I started to wonder if the Windows VRAM allocator was pushing tensor allocations
 to page memory and, therefore, slowing down the pipeline to kernel launch, 
 resulting in a `FlushingPolicyState` overflow. After several hours of research,
@@ -227,4 +228,86 @@ And I still had some time.
 So: `FlushingPolicyState.register()` was being called multiple times between 
 calls to `FlushingPolicyState.should_flush()`. That was a start to finding the true
 cause, I was almost sure of it. So I used my newly-found tool `lldb` with 
-`nvim-dap` to figure out what part of the code was doing it.
+`nvim-dap` to figure out what part of the code was doing it. The next time
+`FlushingPolicyState.register()` was called, I stepped out until I could see
+how exactly it all happened. I finally found it. When allocating  
+tensors, `cubecl-runtime` does not check `FlushingPolicyState.should_flush()`.
+It only checks `should_flush` when launching kernels. I started to get really
+excited. A backtrace of tensor allocation shows the following:
+```
+2: tid=17166 "DSD-0-0":
+ cubecl_runtime::memory_management::drop_queue::policy::FlushingPolicyState::register policy.rs:36
+ cubecl_runtime::memory_management::drop_queue::queue::PendingDropQueue<F>::push queue.rs:87
+ cubecl_hip::compute::command::Command::write_to_gpu command.rs:315
+ <cubecl_hip::compute::server::HipServer as cubecl_runtime::server::base::ComputeServer>::write server.rs:120
+ cubecl_runtime::client::ComputeClient<R>::do_create::{{closure}} client.rs:276
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}}::{{closure}}::{{closure}} channel.rs:129
+ cubecl_common::stream_id::StreamId::executes stream_id.rs:43
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}}::{{closure}} channel.rs:129
+ cubecl_common::device::handle::channel::ChannelService::act_on::{{closure}} channel.rs:362
+ std::thread::local::LocalKey<core::cell::RefCell<T>>::with_borrow::{{closure}} local.rs:673
+ std::thread::local::LocalKey<T>::try_with local.rs:462
+ std::thread::local::LocalKey<T>::with local.rs:426
+ std::thread::local::LocalKey<core::cell::RefCell<T>>::with_borrow local.rs:673
+ cubecl_common::device::handle::channel::ChannelService::act_on channel.rs:357
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}} channel.rs:124
+ <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once unwind_safe.rs:275
+ std::panicking::catch_unwind::do_call panicking.rs:581
+ std::panicking::catch_unwind panicking.rs:544
+ std::panic::catch_unwind panic.rs:359
+ cubecl_common::device::handle::channel::task::Task::init::{{closure}} channel.rs:480
+ core::ops::function::FnOnce::call_once function.rs:250
+ cubecl_common::device::handle::channel::task::Task::run channel.rs:499
+ cubecl_common::device::handle::channel::custom_channel::Server::execute_tasks channel.rs:818
+ cubecl_common::device::handle::channel::custom_channel::Server::start channel.rs:792
+ cubecl_common::device::handle::channel::custom_channel::DeviceClient::new::{{closure}} channel.rs:648
+
+1: tid=17163 "cubecl-issue-13":
+ cubecl_common::device::handle::channel::custom_channel::DeviceClient::new channel.rs:639
+ cubecl_common::device::handle::channel::DeviceRunner::start channel.rs:371
+ cubecl_common::device::handle::channel::ChannelDeviceState::init::{{closure}} channel.rs:282
+ hashbrown::map::Entry<K,V,S,A>::or_insert_with map.rs:3636
+ cubecl_common::device::handle::channel::ChannelDeviceState::init channel.rs:282
+ <cubecl_common::device::handle::channel::ChannelDeviceHandle<S> as cubecl_common::device::handle::base::DeviceHandleSpec<S>>::new channel.rs:57
+ cubecl_common::device::handle::DeviceHandle<S>::new mod.rs:53
+ burn_fusion::client::GlobalFusionClient<R>::load client.rs:60
+ burn_fusion::backend::get_client backend.rs:16
+ burn_fusion::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_fusion::backend::Fusion<B>> for burn_fusion::backend::Fusion<B>>::float_from_data tensor.rs:25
+ burn_autodiff::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_autodiff::backend::Autodiff<B,C>> for burn_autodiff::backend::Autodiff<B,C>>::float_from_data tensor.rs:58
+ burn_backend::tensor::ops::float::<impl burn_backend::tensor::ops::base::BasicOps<B> for burn_backend::tensor::kind::Float>::from_data float.rs:226
+ burn_tensor::tensor::api::base::Tensor<B,_,K>::from_data base.rs:1955
+ cubecl_issue_1359_reproduction::trigger_overflow_burn_multiple_tensors main.rs:12
+ cubecl_issue_1359_reproduction::main main.rs:52
+ core::ops::function::FnOnce::call_once function.rs:250
+ std::sys::backtrace::__rust_begin_short_backtrace backtrace.rs:166
+ std::rt::lang_start::{{closure}} rt.rs:206
+ std::rt::lang_start rt.rs:205
+
+3: tid=17167 "DSD-0-0":
+ __GI___ioctl @ioctl:18
+
+4: tid=17169 "DSD-0-0":
+ syscall @syscall:12
+ cubecl_runtime::stream::event::GcThread<B>::new::{{closure}} event.rs:130
+
+5: tid=17170 "DSU-0-0":
+ __GI___clock_nanosleep @clock_nanosleep@GLIBC_2.2.5:63
+ cubecl_common::device::handle::channel::custom_channel::Server::start channel.rs:809
+ cubecl_common::device::handle::channel::custom_channel::DeviceClient::new::{{closure}} channel.rs:648
+
+6: tid=17171 "DSD-0-0":
+ __GI___ioctl @ioctl:18
+
+```
+
+
+Then I wrote some code I showed earlier. 
+It wrote multiple 2.5GiB tensors to the GPU between kernel launches.
+A quick run of the debugger again, there it was, my beautiful error message:
+```
+thread 'DSD-0-0' (13245) panicked at /home/j/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/memory_management/drop_queue/policy.rs:36:9:
+attempt to add with overflow
+```
+
+
+## The fix was quite simple
