@@ -110,7 +110,7 @@ If the only place was `kernel` and in the same thread `should_flush`, why was an
 
 
 ### The first of many false leads: allocating a tensor larger than 4.29GiB doesn't reproduce the bug 
-I then attempted to reproduce the bug by allocating a 5 GiB tensor:
+I attempted to reproduce the bug by allocating a 5 GiB tensor:
 ```rust
 fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
     let shape = [1_250_000_000]; // 1,250,000,000 f32s * 4 bytes = 5.0gb,
@@ -139,19 +139,20 @@ fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
 I thought, "Surely I'll trigger the bug now! I've allocated more than 4.2GiB into the `PendingDropQueue`!" No dice:
 ![5GiB tensor allocations don't crash the runtime](5gib_failed_attempt.png)
 Look at that! The debugger's stopped on line 37, the addition to `self.bytes_size` 
-is completed. Look at the top left: `bytes` has a len of 5 billion. 
-And `self.bytes_size` is only 705032704? Why? 
-Because using the `as` keyword going from a larger numeric type to a smaller one 
-will truncate it, chopping off any bits in the $2^{32}$ place or higher.
-In the moment, though, this absolutely mystified me because I didn't notice the 
+is completed. Look at the top left: `bytes` reports a length of 5 billion, yet
+`self.bytes_size` is only 705032704. 
+Why? Because using the `as` keyword when casting a larger numeric type
+to a narrower integer type executes a silent bitwise truncation, 
+chopping off any bits in the $2^{32}$ place or higher.
+In the moment, this absolutely mystified me because I didn't notice the 
 truncation happening.
 
 ### Another detour: why it's not a race condition
-Then I thought, _well maybe it's a race condition. Maybe two threads queue up 
-work and/or memory allocations to the GPU faster than `FlushingPolicyState`
-can check itself with `should_flush`._ So I started using my trusty debugger 
-to go through the architecture of how CubeCL loads up tensors and issues 
-commands to the GPU.
+Then I thought, _Well maybe it's a race condition.
+Maybe multiple worker threads queue up asynchronous work and/or memory
+allocations to the GPU faster than `FlushingPolicyState`
+can check itself with `should_flush`._ To verify this hypothesis, 
+I started using my trusty debugger to go through the architecture of how CubeCL loads up tensors and issues commands to the GPU.
 
 I learned a lot about how async runtimes work, and how CubeCL handles things.
 It was quite the journey through a procmacro, an async message-passing pipeline, 
@@ -159,23 +160,24 @@ custom `Drop` implementations, and so on. Massive respect to maintainers,
 I learned a ton from just using `lldb` to inspect how it worked.
 That pipeline was clearly NOT easy to make and it absolutely performs.
 
-At any rate, to figure out how jobs were scheduled, I dropped a breakpoint on 
-`FlushingPolicyState.register()` and stepped the debugger out to look at the 
-whole chain of operations to understand. While it would be inconvenient to
-put the entire pipeline here, it's functionality is, very generally:
-1. An op is called from the high-level interface in `burn`. For example, 
-a `Conv2d` operation is called.
-2. `burn` puts this operation into a queue via message passing.
-3. This message pipes to CubeCL. In CubeCL, the `ComputeClient` and `ComputeServer`,
+At any rate, to figure out how work items were scheduled, I dropped a breakpoint on 
+`FlushingPolicyState.register()` and stepped the debugger out of the stack frames 
+to evaluate caller lineage. Very generally, the workload pipeline evaluates
+like this:
+1. A matrix or tensor operation is called from the high-level interface in `burn`,
+such as a `Conv2d` layer call.
+2. The front end, `burn` puts this operation into a queue via message passing.
+3. The message arrives with CubeCL. The most relevant components of `cubecl`, 
+the `ComputeClient` and `ComputeServer`
 are generic over backend type (e.g. `rocm`, `cuda`, `vulkan`, etc.). 
 The `ComputeClient` receives the op.
 4. The `ComputeClient` puts it in the `ComputeServer`'s queue.
 5. The `ComputeServer` can have more than the two following threads,
 threads, but in my case, consistently, two threads were generated and used
 by the `ComputeServer`: `DSU-0-0` and `DSD-0-0`.
-6. DSU is short for Device Service Upstream, and is responsible for things 
+6. DSU is short for Device Service stage Upstream, and is responsible for things 
 such as kernel fusion and compiling kernels.
-7. DSD is short for Device Service Downstream, and is responsible for managing
+7. DSD is short for Device Service stage Downstream, and is responsible for managing
 GPU memory and launching kernels.
 8. `DSD-0-0` received the op, ran `FlushingPolicyState.register()` via 
 `PendingDropQueue.register()`, launched the kernel, and checked `should_flush()`.
