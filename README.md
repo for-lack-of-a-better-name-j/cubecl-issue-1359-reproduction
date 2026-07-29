@@ -361,9 +361,14 @@ Look very closely at this function from the source code:
 `current.drop_queue.push(data)` doesn't have a corresponding 
 `current.drop_queue.should_flush()`! I kept travelling up the stack trace 
 to see if `should_flush()` was called elsewhere. Sure enough, it wasn't.
+I then dropped a breakpoint in this particular function to increase my 
+certainty about what was going on, and sure enough, it did allow
+multiple calls to `FlushingPolicyState.register()` without checking 
+`should_flush()`.
 
 
-Then I wrote some code I showed earlier. 
+Having determined the root cause of the bug, I finally was able to write 
+the code reproduce the bug that I showed earlier. 
 It wrote multiple 2.5GiB tensors to the GPU between kernel launches.
 A quick run of the debugger again, there it was, my beautiful error message:
 ```
