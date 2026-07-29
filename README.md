@@ -236,7 +236,7 @@ It only checks `should_flush` when launching kernels. I started to get really
 excited. A backtrace of tensor allocation shows the following:
 ```
 2: tid=17166 "DSD-0-0":
- cubecl_runtime::memory_management::drop_queue::policy::FlushingPolicyState::register policy.rs:36
+ cubecl_runtime::memory_management::drop_queue::policy::FlushingPolicyState::register policy.rs:36
  cubecl_runtime::memory_management::drop_queue::queue::PendingDropQueue<F>::push queue.rs:87
  cubecl_hip::compute::command::Command::write_to_gpu command.rs:315
  <cubecl_hip::compute::server::HipServer as cubecl_runtime::server::base::ComputeServer>::write server.rs:120
@@ -299,6 +299,68 @@ excited. A backtrace of tensor allocation shows the following:
  __GI___ioctl @ioctl:18
 
 ```
+This stacktrace is a snapshot of when `FlushingPolicyState.register()` is 
+called. To find out how the bug happened, I reasoned that somewhere in the 
+stack, there had to be a function that was calling 
+`FlushingPolicyState.register()` without checking `should_flush()`. 
+When I stepped out with the debugger, I traced that stack upward, and I finally
+found it here:
+```
+ cubecl_hip::compute::command::Command::write_to_gpu command.rs:315
+```
+Look very closely at this function from the source code:
+```Rust
+    /// Writes data from the host to GPU memory as specified by the copy descriptor.
+    ///
+    /// # Parameters
+    ///
+    /// * `descriptor` - Describes the destination GPU memory, its shape, strides, and element size.
+    /// * `data` - The host data to write to the GPU.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the write operation succeeds.
+    /// * `Err(IoError)` - If the strides are invalid or the resource cannot be accessed.
+    pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
+        let CopyDescriptor {
+            handle: binding,
+            shape,
+            strides,
+            elem_size,
+        } = descriptor;
+        if !has_pitched_row_major_strides(&shape, &strides) {
+            return Err(IoError::UnsupportedStrides {
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let resource = self.resource(binding)?;
+        let size = data.len();
+        let data = match data.property() {
+            AllocationProperty::File => {
+                let mut buffer = self.reserve_pinned(size, None).unwrap();
+                data.copy_into(&mut buffer);
+                buffer
+            }
+            _ => data,
+        };
+        let current = self.streams.current();
+
+        // SAFETY: `resource` is a valid GPU allocation, `data` is a valid host buffer,
+        // and `current.sys` is an initialized HIP stream. The shape/strides have been
+        // validated above to be pitched row-major.
+        unsafe {
+            write_to_gpu(resource, &shape, &strides, elem_size, &data, current.sys)?;
+        };
+
+        current.drop_queue.push(data);
+
+        Ok(())
+    }
+```
+`current.drop_queue.push(data)` doesn't have a corresponding 
+`current.drop_queue.should_flush()`! I kept travelling up the stack trace 
+to see if `should_flush()` was called elsewhere. Sure enough, it wasn't.
 
 
 Then I wrote some code I showed earlier. 
