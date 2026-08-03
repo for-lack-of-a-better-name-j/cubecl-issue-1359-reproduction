@@ -96,7 +96,7 @@ get a chance to flush itself. To determine that, I knew I'd have to understand
 the architecture.
 
 Therefore, I started asking architectural questions: 
-What is the `FlushingPolicyState` anyway? What is it's purpose?
+What is the `FlushingPolicyState` anyway? What is its purpose?
 What does it do? I had never worked on anything this complex in Rust before, 
 so I started off flailing 
 with `println!` macros and trying to just read the code for three 
@@ -651,7 +651,11 @@ Excited, I forked `cubecl` main, made my branch, and navigated to
     }
 ```
 
-While the code from main was different, the core issue was still there. For both 
+While the code from main was different, the core issue was still there. 
+I noticed that maintainers had added a check to see if that stream was
+recording the current graph. If a fenced flush occurs while capturing,
+that would require a host sync, and that would abort whatever capture
+activity was occurring. Thus, for both 
 `cubecl-cuda` and `cubecl-hip`, I added a `should_flush()` check, also 
 respecting the new graph recording:
 
