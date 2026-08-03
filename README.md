@@ -2,7 +2,10 @@
 Minimal reproduction harness and analysis for [CubeCL Issue #1359-Hitting addition with overflow in FlushingPolicyState](https://github.com/tracel-ai/cubecl/issues/1359).
 
 ## Summary
-In `cubecl-hip` version 0.10.0, multiple tensor allocations that are **less than 4.29 GiB individually** but **more than 4.29GiB total** can cause this error, originally pointed out by `jeandudey`  in [CubeCL issue #1359](https://github.com/tracel-ai/cubecl/issues/1359):
+In `cubecl-hip` version 0.10.0, multiple tensor allocations that are 
+**less than 4.29 GiB individually** but **more than 4.29GiB total** can cause 
+this error, originally pointed out by `jeandudey`  in 
+[CubeCL issue #1359](https://github.com/tracel-ai/cubecl/issues/1359):
 ```
 thread 'DSD-0-0' (13245) panicked at /home/j/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/memory_management/drop_queue/policy.rs:36:9:
 attempt to add with overflow
@@ -378,3 +381,327 @@ attempt to add with overflow
 
 
 ## The fix was quite simple
+Now that I understood the root cause of the issue and had a simple way to
+reproduce the bug, it was time to patch it. 
+
+I observed that when launching kernels, `cubecl-hip` and `cubecl-cuda` both 
+check their drop queues. Here is a backtrace from when kernels are 
+launched on `cubecl-hip`:
+```
+2: tid=17844 "DSD-0-0":
+ cubecl_hip::compute::command::Command::kernel command.rs:400
+ cubecl_hip::compute::server::HipServer::launch_checked server.rs:401
+ <cubecl_hip::compute::server::HipServer as cubecl_runtime::server::base::ComputeServer>::launch server.rs:135
+ cubecl_runtime::client::ComputeClient<R>::launch_inner::{{closure}} client.rs:706
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}}::{{closure}}::{{closure}} channel.rs:129
+ cubecl_common::stream_id::StreamId::executes stream_id.rs:43
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}}::{{closure}} channel.rs:129
+ cubecl_common::device::handle::channel::ChannelService::act_on::{{closure}} channel.rs:362
+ std::thread::local::LocalKey<core::cell::RefCell<T>>::with_borrow::{{closure}} local.rs:673
+ std::thread::local::LocalKey<T>::try_with local.rs:462
+ std::thread::local::LocalKey<T>::with local.rs:426
+ std::thread::local::LocalKey<core::cell::RefCell<T>>::with_borrow local.rs:673
+ cubecl_common::device::handle::channel::ChannelService::act_on channel.rs:357
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::submit_inner::{{closure}} channel.rs:124
+ <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once unwind_safe.rs:275
+ std::panicking::catch_unwind::do_call panicking.rs:581
+ std::panicking::catch_unwind panicking.rs:544
+ std::panic::catch_unwind panic.rs:359
+ cubecl_common::device::handle::channel::task::Task::init::{{closure}} channel.rs:480
+ core::ops::function::FnOnce::call_once function.rs:250
+ cubecl_common::device::handle::channel::task::Task::run channel.rs:499
+ cubecl_common::device::handle::channel::custom_channel::Server::execute_tasks channel.rs:818
+ cubecl_common::device::handle::channel::custom_channel::Server::start channel.rs:792
+ cubecl_common::device::handle::channel::custom_channel::DeviceClient::new::{{closure}} channel.rs:648
+
+1: tid=17842 "cubecl-issue-13":
+ syscall @syscall:12
+ oneshot::receiver::Receiver<T>::recv receiver.rs:189
+ cubecl_common::device::handle::channel::ChannelDeviceHandle<S>::run_scoped channel.rs:171
+ <cubecl_common::device::handle::channel::ChannelDeviceHandle<S> as cubecl_common::device::handle::base::DeviceHandleSpec<S>>::submit_blocking channel.rs:80
+ cubecl_common::device::handle::DeviceHandle<S>::submit_blocking mod.rs:69
+ cubecl_runtime::client::ComputeClient<R>::do_read client.rs:104
+ cubecl_runtime::client::ComputeClient<R>::read_tensor_async client.rs:156
+ cubecl_runtime::client::ComputeClient<R>::read_one_tensor_async client.rs:181
+ burn_cubecl::ops::base::into_data::{{closure}} base.rs:38
+ burn_cubecl::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_cubecl::backend::CubeBackend<R,F,I,BT>> for burn_cubecl::backend::CubeBackend<R,F,I,BT>>::float_into_data::{{closure}} tensor.rs:67
+ burn_fusion::tensor::FusionTensor<R>::into_data::{{closure}} tensor.rs:140
+ burn_fusion::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_fusion::backend::Fusion<B>> for burn_fusion::backend::Fusion<B>>::float_into_data::{{closure}}::{{closure}} tensor.rs:180
+ burn_fusion::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_fusion::backend::Fusion<B>> for burn_fusion::backend::Fusion<B>>::float_into_data::{{closure}} tensor.rs:170
+ burn_autodiff::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_autodiff::backend::Autodiff<B,C>> for burn_autodiff::backend::Autodiff<B,C>>::float_into_data::{{closure}}::{{closure}} tensor.rs:88
+ burn_autodiff::ops::tensor::<impl burn_backend::backend::ops::tensor::FloatTensorOps<burn_autodiff::backend::Autodiff<B,C>> for burn_autodiff::backend::Autodiff<B,C>>::float_into_data::{{closure}} tensor.rs:78
+ burn_backend::tensor::ops::float::<impl burn_backend::tensor::ops::base::BasicOps<B> for burn_backend::tensor::kind::Float>::into_data_async::{{closure}} float.rs:216
+ burn_tensor::tensor::api::base::Tensor<B,_,K>::into_data_async::{{closure}} base.rs:1933
+ futures_lite::future::block_on::{{closure}} future.rs:96
+ std::thread::local::LocalKey<T>::try_with local.rs:462
+ std::thread::local::LocalKey<T>::with local.rs:426
+ futures_lite::future::block_on future.rs:75
+ cubecl_common::future::block_on future.rs:39
+ cubecl_common::reader::try_read_sync reader.rs:28
+ burn_tensor::tensor::api::base::Tensor<B,_,K>::try_into_data base.rs:1913
+ burn_tensor::tensor::api::base::Tensor<B,_,K>::into_data base.rs:1899
+ cubecl_issue_1359_reproduction::trigger_overflow_burn_multiple_tensors main.rs:22
+ cubecl_issue_1359_reproduction::main main.rs:52
+ core::ops::function::FnOnce::call_once function.rs:250
+ std::sys::backtrace::__rust_begin_short_backtrace backtrace.rs:166
+ std::rt::lang_start::{{closure}} rt.rs:206
+ std::rt::lang_start rt.rs:205
+
+3: tid=17845 "DSD-0-0":
+ __GI___ioctl @ioctl:18
+
+4: tid=17847 "DSD-0-0":
+ syscall @syscall:12
+ cubecl_runtime::stream::event::GcThread<B>::new::{{closure}} event.rs:130
+
+5: tid=17848 "DSU-0-0":
+ __GI___clock_nanosleep @clock_nanosleep@GLIBC_2.2.5:63
+ cubecl_common::device::handle::channel::custom_channel::Server::start channel.rs:809
+ cubecl_common::device::handle::channel::custom_channel::DeviceClient::new::{{closure}} channel.rs:648
+
+6: tid=17849 "DSD-0-0":
+ __GI___ioctl @ioctl:18
+
+```
+This function
+```
+ cubecl_hip::compute::command::Command::kernel command.rs:400
+```
+is the function that sends kernels off to the GPU. Here is its source:
+```Rust
+    pub fn kernel(
+        &mut self,
+        kernel_id: KernelId,
+        kernel: Box<dyn CubeTask<HipCompiler>>,
+        mode: ExecutionMode,
+        dispatch_count: (u32, u32, u32),
+        resources: &[GpuResource],
+        logger: Arc<ServerLogger>,
+    ) -> Result<(), LaunchError> {
+        if !self.ctx.module_names.contains_key(&kernel_id) {
+            self.ctx.compile_kernel(&kernel_id, kernel, mode, logger)?;
+        }
+
+        let stream = self.streams.current();
+
+        let result = self
+            .ctx
+            .execute_task(stream, kernel_id, dispatch_count, resources);
+
+        if stream.drop_queue.should_flush() {
+            stream.drop_queue.flush(|| Fence::new(stream.sys));
+        }
+
+        if let Err(err) = result {
+            match self.ctx.timestamps.is_empty() {
+                true => Err(err)?,
+                false => self.ctx.timestamps.error(ProfileError::Launch(err)),
+            }
+        };
+
+        Ok(())
+    }
+```
+Aha! It has
+```Rust
+if stream.drop_queue.should_flush() {
+    stream.drop_queue.flush(|| Fence::new(stream.sys));
+}
+```
+which checks if the `PendingDropQueue` (and by extension the 
+`FlushingPolicyState`) should be flushed, and flushes it if needed. Therefore,
+the fix for this issue was very simple. To patch it locally, I simply added
+almost the exact same code to `write_to_gpu`:
+```Rust
+▏   pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
+   ▏   ▏   let CopyDescriptor {
+   ▏   ▏   ▏   handle: binding,
+   ▏   ▏   ▏   shape,
+   ▏   ▏   ▏   strides,
+   ▏   ▏   ▏   elem_size,
+   ▏   ▏   } = descriptor;
+   ▏   ▏   if !has_pitched_row_major_strides(&shape, &strides) {
+   ▏   ▏   ▏   return Err(IoError::UnsupportedStrides {
+   ▏   ▏   ▏   ▏   backtrace: BackTrace::capture(),
+   ▏   ▏   ▏   });
+   ▏   ▏   }
+   ▏   ▏
+   ▏   ▏   let resource = self.resource(binding)?;
+   ▏   ▏   let size = data.len();
+   ▏   ▏   let data = match data.property() {
+   ▏   ▏   ▏   AllocationProperty::File => {
+   ▏   ▏   ▏   ▏   let mut buffer = self.reserve_pinned(size, None).unwrap();
+   ▏   ▏   ▏   ▏   data.copy_into(&mut buffer);
+   ▏   ▏   ▏   ▏   buffer
+   ▏   ▏   ▏   }
+   ▏   ▏   ▏   _ => data,
+   ▏   ▏   };
+   ▏   ▏   let current = self.streams.current();
+   ▏   ▏
+   ▏   ▏   // SAFETY: `resource` is a valid GPU allocation, `data` is a valid host buffer,
+   ▏   ▏   // and `current.sys` is an initialized HIP stream. The shape/strides have been
+   ▏   ▏   // validated above to be pitched row-major.
+   ▏   ▏   unsafe {
+   ▏   ▏   ▏   write_to_gpu(resource, &shape, &strides, elem_size, &data, current.sys)?;
+   ▏   ▏   };
+   ▏   ▏
+   ▏   ▏   current.drop_queue.push(data);
+   ▏   ▏
+           // PATCH START
+   ▏   ▏   if current.drop_queue.should_flush() {
+   ▏   ▏   ▏   current.drop_queue.flush(|| Fence::new(current.sys));
+   ▏   ▏   }
+           // PATCH END
+   ▏   ▏
+   ▏   ▏   Ok(())
+   ▏   }
+```
+
+I ran it a couple times, and saw that the bug was fixed! No more overflows!
+Excited, I forked `cubecl` main, made my branch, and navigated to 
+`write_to_gpu`. I then saw the following:
+```Rust
+    pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
+        let CopyDescriptor {
+            handle: binding,
+            shape,
+            strides,
+            elem_size,
+        } = descriptor;
+        if !has_pitched_row_major_strides(&shape, &strides) {
+            return Err(IoError::UnsupportedStrides {
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let resource = self.resource(binding)?;
+        let size = data.len();
+
+        // An empty tensor (a zero dim in its shape) has nothing to copy. Bail
+        // before staging: the zero-size staging buffer has no real backing (a
+        // dangling pointer), and the 2D copy below would still transfer
+        // `width_bytes` from it when only the leading dims are zero.
+        if size == 0 {
+            return Ok(());
+        }
+
+        let property = data.property();
+
+        // Transfers up to this size go through a pinned staging buffer (faster DMA).
+        const STAGE_MAX: usize = 100 * MB;
+        // Above this size we flush the drop queue so the source buffer is released promptly.
+        const FLUSH_MIN: usize = 10 * MB;
+
+        // Stage file-backed data, and small host data that isn't already pinned. Re-staging
+        // already-pinned memory would be a redundant pinned-to-pinned copy.
+        let should_stage = matches!(property, AllocationProperty::File)
+            || (size < STAGE_MAX && !matches!(property, AllocationProperty::Pinned));
+        let should_flush = size > FLUSH_MIN || matches!(property, AllocationProperty::File);
+
+        let data = match should_stage {
+            true => {
+                let mut buffer = self.reserve_pinned(size, None).unwrap();
+                data.copy_into(&mut buffer);
+                buffer
+            }
+            false => data,
+        };
+
+        let current = self.streams.current();
+
+        // SAFETY: `resource` is a valid GPU allocation, `data` is a valid host buffer,
+        // and `current.sys` is an initialized HIP stream. The shape/strides have been
+        // validated above to be pitched row-major.
+        unsafe {
+            write_to_gpu(resource, &shape, &strides, elem_size, &data, current.sys)?;
+        };
+
+        current.drop_queue.push(data);
+
+        // Defer fenced flushes while capturing — a host sync aborts the capture.
+        if should_flush && !current.capturing.is_recording() {
+            current.drop_queue.flush(|| Fence::new(current.sys));
+        }
+
+        Ok(())
+    }
+```
+I looked at Github and noticed this bug was fixed in [Commit 1b43580](https://github.com/tracel-ai/cubecl/commit/1b435802f1789764cfd079f91087f9f30181da25).
+Look at that:
+```Rust
+pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
+        let CopyDescriptor {
+            handle,
+            shape,
+            strides,
+            elem_size,
+        } = descriptor;
+        if !has_pitched_row_major_strides(&shape, &strides) {
+            return Err(IoError::UnsupportedStrides {
+                backtrace: BackTrace::capture(),
+            });
+        }
+
+        let resource = self.resource(handle)?;
+
+        let size = data.len();
+
+        let property = data.property();
+
+        // Transfers up to this size go through a pinned staging buffer (faster DMA).
+        const STAGE_MAX: usize = 100 * MB;
+        // Above this size we flush the drop queue so the source buffer is released promptly.
+        const FLUSH_MIN: usize = 10 * MB;
+
+        // Stage file-backed data, and small host data that isn't already pinned. Re-staging
+        // already-pinned memory would be a redundant pinned-to-pinned copy.
+        let should_stage = matches!(property, AllocationProperty::File)
+            || (size < STAGE_MAX && !matches!(property, AllocationProperty::Pinned));
+        let should_flush = size > FLUSH_MIN || matches!(property, AllocationProperty::File);
+
+        let data = match should_stage {
+            true => {
+                let mut buffer = self.reserve_pinned(size, None).unwrap();
+                data.copy_into(&mut buffer);
+                buffer
+            }
+            false => data,
+        };
+
+        let current = self.streams.current();
+
+        // SAFETY: `resource.ptr` is a valid GPU allocation, `data` is a valid host buffer,
+        // and `current.sys` is an initialized CUDA stream. The shape/strides have been
+        // validated above to be pitched row-major.
+        unsafe {
+            write_to_gpu(
+                &shape,
+                &strides,
+                elem_size,
+                &data,
+                resource.ptr,
+                current.sys,
+            )
+        }?;
+
+        current.drop_queue.push(data);
+
+        if should_flush {
+            current.drop_queue.flush(|| Fence::new(current.sys));
+        }
+
+        Ok(())
+    }
+
+```
+
+While the code is different, the core issue is still there. For both 
+`cubecl-cuda` and `cubecl-hip`, I added a should_flush check:
+
+```Rust
+        if should_flush || current.drop_queue.should_flush() {
+            current.drop_queue.flush(|| Fence::new(current.sys));
+        }
+```
+I wrote a PR and it was merged in [CubeCL PR #1456](https://github.com/tracel-ai/cubecl/pull/1456).
+
