@@ -1,5 +1,7 @@
 # cubecl-issue-1359-reproduction
-Minimal reproduction harness and analysis for [CubeCL Issue #1359-Hitting addition with overflow in FlushingPolicyState](https://github.com/tracel-ai/cubecl/issues/1359).
+Minimal reproduction harness and analysis for the bug I fixed in CubeCL.
+Here's a link to the merged PR: [CubeCL PR #1456](https://github.com/tracel-ai/cubecl/pull/1456).
+[CubeCL Issue #1359-Hitting addition with overflow in FlushingPolicyState](https://github.com/tracel-ai/cubecl/issues/1359).
 
 ## Summary
 In `cubecl-hip` version 0.10.0, multiple tensor allocations that are 
@@ -35,10 +37,14 @@ impl FlushingPolicyState {
     }
 }
 ```
-Since the panic happened on both WSL on ROCm as well as CUDA per the issue, it was clear that the issue was vendor-agnostic. To reproduce the bug, I used `lldb` to inspect state at the time of the crash:
+Since the panic happened on both WSL on ROCm as well as CUDA per the issue, it 
+was clear that the issue was vendor-agnostic. To reproduce the bug, I used 
+`lldb` to inspect state at the time of the crash:
 ![LLDB showing bytes_size overflow](reproduced_the_bug_with_bytes_size.png)
 ### Code to Reproduce
-Since the bug triggers when multiple tensors, individually less than 4.29GiB, but collectively more than 4.29GiB were written to the GPU between kernel launches, I wrote a minimal reproduction function:
+Since the bug triggers when multiple tensors, individually less than 4.29GiB, 
+but collectively more than 4.29GiB were written to the GPU between kernel 
+launches, I wrote a minimal reproduction function that does just that:
 ```rust
 fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     let mut tensors = Vec::new();
@@ -61,16 +67,21 @@ fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     println!("raw_data: {:?}", raw_data);
 }
 ```
-In this function, three tensors of 2.5GiB are allocated. CubeCL uses lazy evaluation, so it does not send tensors to the GPU until they are used in the multiplication, so the panic does not happen until the multiplication occurs. Since CubeCL does not check to flush on each tensor allocation, and only checks in GPU kernel launches, the loop causes `FlushingPolicyState.bytes_size` to overflow with >5GiB of allocations before the next kernel launch can flush it.
+In this function, three tensors of 2.5GiB are allocated. CubeCL uses lazy 
+evaluation, so it does not send tensors to the GPU until they are used in the 
+multiplication, so the panic does not happen until the multiplication occurs. 
+Since CubeCL does not check to flush on each tensor allocation, and only checks
+in GPU kernel launches, the loop causes `FlushingPolicyState.bytes_size` to 
+overflow with >5GiB of allocations before the next kernel launch can flush it.
 
 ## Root Cause Analysis
 If you're reading this and you're still interested, this is the part where I'll
 talk a little bit more about the thought process that I used to find the root 
 cause of the bug. I knew that a simple type widening of a value may have been a
 band-aid fix because developers often build little sanity checks into their 
-code. NASA, for example, uses lots of assert statements: "If this assert breaks, 
-the assumptions made while writing this code are broken and something must be
-done about it." So I started thinking that the fact that the `u32` type
+code. NASA, for example, uses lots of assert statements that act as canaries,
+so that assumptions that were written during engineering are made explicit.
+Thus, I started thinking that the fact that the `u32` type
 in `FlushingPolicyState.bytes_size` was intentional. 
 
 I wondered what it could have been--a producer-consumer imbalance? That's what
@@ -78,13 +89,16 @@ I thought at first. I quickly rejected that hypothesis as I could not find
 sufficient evidence. I was wondering if it were a race condition--the OP said
 that the problem occurred with more threads. So I bumped up the thread count 
 and, rather than this particular bug, got an OOM error and my compositor 
-crashed! In my mind, the race condition case would mean that multiple threads 
+crashed, and I couldn't find the same bug message in the logs. 
+In my mind, the race condition case would mean that multiple threads 
 were able to race to the FlushingPolicyState counter faster than it could
-get a chance to flush itself. 
+get a chance to flush itself. To determine that, I knew I'd have to understand
+the architecture.
 
-Then I wondered--what is the `FlushingPolicyState` anyway? What is it's purpose?
-What does it do? So I started trying to reason about the codebase. I had never
-worked on anything this complex in Rust before, so I started off flailing 
+Therefore, I started asking architectural questions: 
+What is the `FlushingPolicyState` anyway? What is it's purpose?
+What does it do? I had never worked on anything this complex in Rust before, 
+so I started off flailing 
 with `println!` macros and trying to just read the code for three 
 weeks. I tried everything I could think of; but CubeCL is an async runtime
 with many moving parts: procmacros, channels, and lots of threads going 
@@ -95,21 +109,25 @@ ecosystem had a good debugger. Turns out it did; so I set up `lldb` in my
 AstroNvim installation with the defaults from the 
 `astronvim-community` repository. 
 
-Once I set up `lldb` figuring out how the system worked was much easier. For a 
+Once I set up `lldb`, figuring out how the system worked was much easier. For a 
 while there, it felt like Sisyphus pushing on that boulder in Tartarus--I had 
 chosen a bit of a challenging task to start with in the low-level space, but
-I just knew there had to be some mechanistic reason for the `u32` overflow. With `lldb`, I learned that `FlushingPolicyState.register()` is only called to in two situations: 
-1. When tensors are written to the GPU.
-2. When kernels are launched.
+I just knew there had to be some mechanistic reason for the `u32` overflow. 
+With `lldb`, I could only see that `FlushingPolicyState.register()` get called
+in one situation: when kernels are launched.
 
 To figure that out though, I had to get a decent idea of how CubeCL sends work
-to the GPU. So I ran the OP's code and dropped a breakpoint on `FlushingPolicyState.register()`. Then I stepped out of functions until
+to the GPU. So I ran the OP's code and dropped a breakpoint on 
+`FlushingPolicyState.register()`. Then I stepped out of functions until
 I could see the `FlushingPolicyState.register()`'s caller. I only saw one 
 function that ever actually called it, and it was in `cubecl-hip`:
-`write_to_gpu()`, which was called by the kernel launching function of the `ComputeServer` which is `kernel`. I then noticed that in that very same thread and execution
-path (therefore no possibility for race in this particular case) that
-`PendingDropQueue.should_flush()` was called. To be honest I was stumped.
-If the only place was `kernel` and in the same thread `should_flush`, why was an overflow happening? I decided to try overflowing it by allocating a single 5GiB tensor.
+`write_to_gpu()`, which was called by the kernel launching function of the 
+`ComputeServer` which is `kernel`. I then noticed that in that 
+very same thread and execution path, that `PendingDropQueue.should_flush()`
+was called. My race condition disproved for the time being, I was stumped.
+If the only place was `kernel` and in the same thread `should_flush`, 
+why was an overflow happening? I decided to try overflowing it by allocating 
+a single 5GiB tensor.
 
 
 ### The first of many false leads: allocating a tensor larger than 4.29GiB doesn't reproduce the bug 
@@ -155,7 +173,8 @@ Then I thought, _Well maybe it's a race condition.
 Maybe multiple worker threads queue up asynchronous work and/or memory
 allocations to the GPU faster than `FlushingPolicyState`
 can check itself with `should_flush`._ To verify this hypothesis, 
-I started using my trusty debugger to go through the architecture of how CubeCL loads up tensors and issues commands to the GPU.
+I started using my trusty debugger to go through the architecture of how CubeCL 
+loads up tensors and issues commands to the GPU.
 
 I learned a lot about how async runtimes work, and how CubeCL handles things.
 It was quite the journey through a procmacro, an async message-passing pipeline, 
@@ -171,12 +190,12 @@ like this:
 such as a `Conv2d` layer call.
 2. The front end, `burn` puts this operation into a queue via message passing.
 3. The message arrives in `cubecl-hip`'s boundaries. The most relevant  
-components of `cubecl`, the `ComputeClient` and `ComputeServer`,
+components of `cubecl` for this report, the `ComputeClient` and `ComputeServer`,
 are generic over backend type (e.g. `rocm`, `cuda`, `vulkan`, etc.), 
 and the exact crate changes depending on what backend is used.
 The `ComputeClient` receives the op from the front end.
 4. The `ComputeClient` puts it in a queue to pass to the `ComputeServer`.
-5. The custom channel in `cubecl-common` use can have more than the two 
+5. The custom channel in `cubecl-common` can have more than the two 
 following threads, but in my case, consistently, two threads were generated and
 used: `DSU-0-0` and `DSD-0-0`.
 6. DSU is short for Device Service stage Upstream, and is responsible for producing 
@@ -188,7 +207,7 @@ GPU memory and launching kernels.
 and flushed if needed.
 
 I stared at `DSD-0-0`'s codepath, stumped. I stared at what I thought was the 
-one entry hierearchy that called `FlushingPolicyState.register()`.
+one logical path that called `FlushingPolicyState.register()`.
 
 My hypothesis disproven, I recorded what evidence I found.
 I knew it wasn't a race condition because the only thread that launched
@@ -204,25 +223,30 @@ and the OP was experiencing VRAM usage at around 12GiB,
 I started to wonder if the Windows VRAM allocator was pushing tensor allocations
 to page memory and, therefore, slowing down the pipeline to kernel launch, 
 resulting in a `FlushingPolicyState` overflow. After several hours of research,
-I determined that the documentation was not clear enough to give a definitive answer.
-Additionally, another poster running CUDA on Arch Linux was reporting the same bug.
+I determined that the documentation was not clear enough to give a 
+definitive answer. Additionally, another poster running CUDA 
+on Arch Linux was reporting the same bug.
 Since evidence was insufficient for now, I decided to go back to the debugger.
 
 ### _Wait, that's funny..._
 It all starts with, _Wait, that's funny..._ doesn't it? This root cause sure did.
 I was looking all over the code base, setting conditional breakpoints in `lldb`
 for anything that might cause the runtime to break. Absolutely nothing. I was 
-mystified. At some point I just gave up and made a conditional breakpoint such that
-when anything over 2MiB was in the `FlushingPolicyState.bytes_size` it would stop.
-I also had another breakpoint on the `FlushingPolicyState.should_flush` method.
+mystified. At some point I just gave up and made a conditional breakpoint such
+that when anything over 2MiB was in the `FlushingPolicyState.bytes_size` 
+it would stop.
+I also had another breakpoint on the `FlushingPolicyState.should_flush()` method.
 I was in a bit of a zombie mode at that point, hoping, wishing, for something to
 happen. I was just on the precipice of wondering whether this was worth my time,
-or if I was ever going to find it, but I kept at it. After pushing the continue button for `nvim-dap` many, many times, I saw something. 
+or if I was ever going to find it, but I kept at it. After pushing the continue
+button for `nvim-dap` many, many times, I saw something. 
 I thought, "Wait, that's funny..." and realized that 
 `FlushingPolicyState.register()` was being called multiple times between 
 `FlushingPolicyState.should_flush()` calls.
 I got really excited. The only thing I had to figure out next was how.
-I was out of time for that day so I logged off. The next day, for the first
+I was out of time for that day so I logged off. 
+
+The next day, for the first
 hour or so, I could not for the life of me get it to happen again.
 With dismay I desperately kept hitting F5. Then--finally--it happened again.
 And I still had some time.
@@ -626,80 +650,13 @@ Excited, I forked `cubecl` main, made my branch, and navigated to
         Ok(())
     }
 ```
-I looked at Github and noticed this bug was fixed in [Commit 1b43580](https://github.com/tracel-ai/cubecl/commit/1b435802f1789764cfd079f91087f9f30181da25).
-Look at that:
-```Rust
-pub fn write_to_gpu(&mut self, descriptor: CopyDescriptor, data: Bytes) -> Result<(), IoError> {
-        let CopyDescriptor {
-            handle,
-            shape,
-            strides,
-            elem_size,
-        } = descriptor;
-        if !has_pitched_row_major_strides(&shape, &strides) {
-            return Err(IoError::UnsupportedStrides {
-                backtrace: BackTrace::capture(),
-            });
-        }
 
-        let resource = self.resource(handle)?;
-
-        let size = data.len();
-
-        let property = data.property();
-
-        // Transfers up to this size go through a pinned staging buffer (faster DMA).
-        const STAGE_MAX: usize = 100 * MB;
-        // Above this size we flush the drop queue so the source buffer is released promptly.
-        const FLUSH_MIN: usize = 10 * MB;
-
-        // Stage file-backed data, and small host data that isn't already pinned. Re-staging
-        // already-pinned memory would be a redundant pinned-to-pinned copy.
-        let should_stage = matches!(property, AllocationProperty::File)
-            || (size < STAGE_MAX && !matches!(property, AllocationProperty::Pinned));
-        let should_flush = size > FLUSH_MIN || matches!(property, AllocationProperty::File);
-
-        let data = match should_stage {
-            true => {
-                let mut buffer = self.reserve_pinned(size, None).unwrap();
-                data.copy_into(&mut buffer);
-                buffer
-            }
-            false => data,
-        };
-
-        let current = self.streams.current();
-
-        // SAFETY: `resource.ptr` is a valid GPU allocation, `data` is a valid host buffer,
-        // and `current.sys` is an initialized CUDA stream. The shape/strides have been
-        // validated above to be pitched row-major.
-        unsafe {
-            write_to_gpu(
-                &shape,
-                &strides,
-                elem_size,
-                &data,
-                resource.ptr,
-                current.sys,
-            )
-        }?;
-
-        current.drop_queue.push(data);
-
-        if should_flush {
-            current.drop_queue.flush(|| Fence::new(current.sys));
-        }
-
-        Ok(())
-    }
-
-```
-
-While the code is different, the core issue is still there. For both 
-`cubecl-cuda` and `cubecl-hip`, I added a should_flush check:
+While the code from main was different, the core issue was still there. For both 
+`cubecl-cuda` and `cubecl-hip`, I added a `should_flush()` check, also 
+respecting the new graph recording:
 
 ```Rust
-        if should_flush || current.drop_queue.should_flush() {
+        if (should_flush || current.drop_queue.should_flush()) && !current.capturing.is_recording() {
             current.drop_queue.flush(|| Fence::new(current.sys));
         }
 ```
