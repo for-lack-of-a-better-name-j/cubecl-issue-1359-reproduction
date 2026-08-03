@@ -48,7 +48,7 @@ launches, I wrote a minimal reproduction function that does just that:
 ```rust
 fn trigger_overflow_burn_multiple_tensors<B: Backend>(device: &B::Device) {
     let mut tensors = Vec::new();
-    let shape = [625_000_000]; // 625,000,000 f32s * 4 bytes = 2.5gb,
+    let shape = [625_000_000]; // 625,000,000 f32s * 4 bytes = 2.5GiB,
     println!("Big data dump into allocation queue");
     for i in 0..3 {
         println!("creating tensor {i}");
@@ -134,7 +134,7 @@ a single 5GiB tensor.
 I attempted to reproduce the bug by allocating a 5 GiB tensor:
 ```rust
 fn allocate_humongous_tensor<B: Backend>(device: &B::Device) {
-    let shape = [1_250_000_000]; // 1,250,000,000 f32s * 4 bytes = 5.0gb,
+    let shape = [1_250_000_000]; // 1,250,000,000 f32s * 4 bytes = 5.0GiB
     println!("Creating humongous tensor!");
     let humongous_data = TensorData::ones::<f32, _>(shape);
     let humongous_tensor = Tensor::<B, 1>::from_data(humongous_data, device);
